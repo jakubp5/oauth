@@ -1,184 +1,181 @@
-package options
+package validation
 
 import (
-	"crypto"
+	"context"
+	"crypto/tls"
+	"fmt"
+	"net/http"
 	"net/url"
+	"strings"
 
-	ipapi "github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/ip"
+	"github.com/mbland/hmacauth"
+	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/apis/options"
+	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/ip"
+	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/logger"
 	internaloidc "github.com/oauth2-proxy/oauth2-proxy/v7/pkg/providers/oidc"
-	"github.com/spf13/pflag"
+	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/requests"
+	"github.com/oauth2-proxy/oauth2-proxy/v7/pkg/util"
 )
 
-// SignatureData holds hmacauth signature hash and key
-type SignatureData struct {
-	Hash crypto.Hash
-	Key  string
-}
+// Validate checks that required options are set and validates those that they
+// are of the correct format
+func Validate(o *options.Options) error {
+	msgs := validateCookie(o.Cookie)
+	msgs = append(msgs, validateSessionCookieMinimal(o)...)
+	msgs = append(msgs, validateRedisSessionStore(o)...)
+	msgs = append(msgs, prefixValues("injectRequestHeaders: ", validateHeaders(o.InjectRequestHeaders)...)...)
+	msgs = append(msgs, prefixValues("injectResponseHeaders: ", validateHeaders(o.InjectResponseHeaders)...)...)
+	msgs = append(msgs, validateProviders(o)...)
+	msgs = append(msgs, validateAPIRoutes(o)...)
+	msgs = configureLogger(o.Logging, msgs)
+	msgs = parseSignatureKey(o, msgs)
 
-// Options holds Configuration Options that can be set by Command Line Flag,
-// or Config File
-type Options struct {
-	ProxyPrefix         string   `flag:"proxy-prefix" cfg:"proxy_prefix"`
-	PingPath            string   `flag:"ping-path" cfg:"ping_path"`
-	PingUserAgent       string   `flag:"ping-user-agent" cfg:"ping_user_agent"`
-	ReadyPath           string   `flag:"ready-path" cfg:"ready_path"`
-	ReverseProxy        bool     `flag:"reverse-proxy" cfg:"reverse_proxy"`
-	RealClientIPHeader  string   `flag:"real-client-ip-header" cfg:"real_client_ip_header"`
-	TrustedIPs          []string `flag:"trusted-ip" cfg:"trusted_ips"`
-	ForceHTTPS          bool     `flag:"force-https" cfg:"force_https"`
-	RawRedirectURL      string   `flag:"redirect-url" cfg:"redirect_url"`
-	RelativeRedirectURL bool     `flag:"relative-redirect-url" cfg:"relative_redirect_url"`
-
-	AuthenticatedEmailsFile string   `flag:"authenticated-emails-file" cfg:"authenticated_emails_file"`
-	EmailDomains            []string `flag:"email-domain" cfg:"email_domains"`
-	WhitelistDomains        []string `flag:"whitelist-domain" cfg:"whitelist_domains"`
-	HtpasswdFile            string   `flag:"htpasswd-file" cfg:"htpasswd_file"`
-	HtpasswdUserGroups      []string `flag:"htpasswd-user-group" cfg:"htpasswd_user_groups"`
-
-	Cookie    Cookie         `cfg:",squash"`
-	Session   SessionOptions `cfg:",squash"`
-	Logging   Logging        `cfg:",squash"`
-	Templates Templates      `cfg:",squash"`
-
-	// Not used in the legacy config, name not allowed to match an external key (upstreams)
-	// TODO(JoelSpeed): Rename when legacy config is removed
-	UpstreamServers UpstreamConfig `cfg:",internal"`
-
-	InjectRequestHeaders  []Header `cfg:",internal"`
-	InjectResponseHeaders []Header `cfg:",internal"`
-
-	Server        Server `cfg:",internal"`
-	MetricsServer Server `cfg:",internal"`
-
-	Providers Providers `cfg:",internal"`
-
-	APIRoutes                []string `flag:"api-route" cfg:"api_routes"`
-	SkipAuthRegex            []string `flag:"skip-auth-regex" cfg:"skip_auth_regex"`
-	SkipAuthRoutes           []string `flag:"skip-auth-route" cfg:"skip_auth_routes"`
-	SkipJwtBearerTokens      bool     `flag:"skip-jwt-bearer-tokens" cfg:"skip_jwt_bearer_tokens"`
-	BearerTokenLoginFallback bool     `flag:"bearer-token-login-fallback" cfg:"bearer_token_login_fallback"`
-	ExtraJwtIssuers          []string `flag:"extra-jwt-issuers" cfg:"extra_jwt_issuers"`
-	SkipProviderButton       bool     `flag:"skip-provider-button" cfg:"skip_provider_button"`
-	SSLInsecureSkipVerify    bool     `flag:"ssl-insecure-skip-verify" cfg:"ssl_insecure_skip_verify"`
-	SkipAuthPreflight        bool     `flag:"skip-auth-preflight" cfg:"skip_auth_preflight"`
-	ForceJSONErrors          bool     `flag:"force-json-errors" cfg:"force_json_errors"`
-	EncodeState              bool     `flag:"encode-state" cfg:"encode_state"`
-	AllowQuerySemicolons     bool     `flag:"allow-query-semicolons" cfg:"allow_query_semicolons"`
-
-	SignatureKey    string `flag:"signature-key" cfg:"signature_key"`
-	GCPHealthChecks bool   `flag:"gcp-healthchecks" cfg:"gcp_healthchecks"`
-
-	// This is used for backwards compatibility for basic auth users
-	LegacyPreferEmailToUser bool `cfg:",internal"`
-
-	// MQTT configuration for dynamic group loading
-	MQTTUsername           string `flag:"mqtt-username" cfg:"mqtt_username"`
-	MQTTPassword           string `flag:"mqtt-password" cfg:"mqtt_password"`
-	MQTTBroker             string `flag:"mqtt-broker" cfg:"mqtt_broker"`
-	MQTTPort               int    `flag:"mqtt-port" cfg:"mqtt_port"`
-	MQTTAllowedGroupsTopic string `flag:"mqtt-allowed-groups-topic" cfg:"mqtt_allowed_groups_topic"`
-
-	// internal values that are set after config validation
-	redirectURL        *url.URL
-	signatureData      *SignatureData
-	oidcVerifier       internaloidc.IDTokenVerifier
-	jwtBearerVerifiers []internaloidc.IDTokenVerifier
-	realClientIPParser ipapi.RealClientIPParser
-}
-
-// Options for Getting internal values
-func (o *Options) GetRedirectURL() *url.URL                      { return o.redirectURL }
-func (o *Options) GetSignatureData() *SignatureData              { return o.signatureData }
-func (o *Options) GetOIDCVerifier() internaloidc.IDTokenVerifier { return o.oidcVerifier }
-func (o *Options) GetJWTBearerVerifiers() []internaloidc.IDTokenVerifier {
-	return o.jwtBearerVerifiers
-}
-func (o *Options) GetRealClientIPParser() ipapi.RealClientIPParser { return o.realClientIPParser }
-
-// Options for Setting internal values
-func (o *Options) SetRedirectURL(s *url.URL)                              { o.redirectURL = s }
-func (o *Options) SetSignatureData(s *SignatureData)                      { o.signatureData = s }
-func (o *Options) SetOIDCVerifier(s internaloidc.IDTokenVerifier)         { o.oidcVerifier = s }
-func (o *Options) SetJWTBearerVerifiers(s []internaloidc.IDTokenVerifier) { o.jwtBearerVerifiers = s }
-func (o *Options) SetRealClientIPParser(s ipapi.RealClientIPParser)       { o.realClientIPParser = s }
-
-// NewOptions constructs a new Options with defaulted values
-func NewOptions() *Options {
-	return &Options{
-		BearerTokenLoginFallback: true,
-		ProxyPrefix:              "/oauth2",
-		Providers:                providerDefaults(),
-		PingPath:                 "/ping",
-		ReadyPath:                "/ready",
-		RealClientIPHeader:       "X-Real-IP",
-		ForceHTTPS:               false,
-		Cookie:                   cookieDefaults(),
-		Session:                  sessionOptionsDefaults(),
-		Templates:                templatesDefaults(),
-		SkipAuthPreflight:        false,
-		Logging:                  loggingDefaults(),
+	if o.SSLInsecureSkipVerify {
+		transport := requests.DefaultTransport.(*http.Transport)
+		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- InsecureSkipVerify is a configurable option we allow
+	} else if len(o.Providers[0].CAFiles) > 0 {
+		pool, err := util.GetCertPool(o.Providers[0].CAFiles, o.Providers[0].UseSystemTrustStore)
+		if err == nil {
+			transport := requests.DefaultTransport.(*http.Transport)
+			transport.TLSClientConfig = &tls.Config{
+				RootCAs:    pool,
+				MinVersion: tls.VersionTLS12,
+			}
+		} else {
+			msgs = append(msgs, fmt.Sprintf("unable to load provider CA file(s): %v", err))
+		}
 	}
+
+	if o.AuthenticatedEmailsFile == "" && len(o.EmailDomains) == 0 && o.HtpasswdFile == "" {
+		msgs = append(msgs, "missing setting for email validation: email-domain or authenticated-emails-file required."+
+			"\n      use email-domain=* to authorize all email addresses")
+	}
+
+	if o.SkipJwtBearerTokens {
+		// Configure extra issuers
+		if len(o.ExtraJwtIssuers) > 0 {
+			var jwtIssuers []jwtIssuer
+			jwtIssuers, msgs = parseJwtIssuers(o.ExtraJwtIssuers, msgs)
+			for _, jwtIssuer := range jwtIssuers {
+				verifier, err := newVerifierFromJwtIssuer(
+					o.Providers[0].OIDCConfig.AudienceClaims,
+					o.Providers[0].OIDCConfig.ExtraAudiences,
+					jwtIssuer,
+				)
+				if err != nil {
+					msgs = append(msgs, fmt.Sprintf("error building verifiers: %s", err))
+				}
+				o.SetJWTBearerVerifiers(append(o.GetJWTBearerVerifiers(), verifier))
+			}
+		}
+	}
+
+	var redirectURL *url.URL
+	redirectURL, msgs = parseURL(o.RawRedirectURL, "redirect", msgs)
+	o.SetRedirectURL(redirectURL)
+	if o.RawRedirectURL == "" && !o.Cookie.Secure && !o.ReverseProxy {
+		logger.Print("WARNING: no explicit redirect URL: redirects will default to insecure HTTP")
+	}
+
+	msgs = append(msgs, validateUpstreams(o.UpstreamServers)...)
+
+	if o.ReverseProxy {
+		parser, err := ip.GetRealClientIPParser(o.RealClientIPHeader)
+		if err != nil {
+			msgs = append(msgs, fmt.Sprintf("real_client_ip_header (%s) not accepted parameter value: %v", o.RealClientIPHeader, err))
+		}
+		o.SetRealClientIPParser(parser)
+
+		// Allow the logger to get client IPs
+		logger.SetGetClientFunc(func(r *http.Request) string {
+			return ip.GetClientString(o.GetRealClientIPParser(), r, false)
+		})
+	}
+
+	// Do this after ReverseProxy validation for TrustedIP coordinated checks
+	msgs = append(msgs, validateAllowlists(o)...)
+
+	if len(msgs) != 0 {
+		return fmt.Errorf("invalid configuration:\n  %s",
+			strings.Join(msgs, "\n  "))
+	}
+	return nil
 }
 
-// NewFlagSet creates a new FlagSet with all of the flags required by Options
-func NewFlagSet() *pflag.FlagSet {
-	flagSet := pflag.NewFlagSet("oauth2-proxy", pflag.ExitOnError)
+func parseSignatureKey(o *options.Options, msgs []string) []string {
+	if o.SignatureKey == "" {
+		return msgs
+	}
 
-	flagSet.Bool("reverse-proxy", false, "are we running behind a reverse proxy, controls whether headers like X-Real-Ip are accepted")
-	flagSet.String("real-client-ip-header", "X-Real-IP", "Header used to determine the real IP of the client (one of: X-Forwarded-For, X-Real-IP, X-ProxyUser-IP, X-Envoy-External-Address, or CF-Connecting-IP)")
-	flagSet.StringSlice("trusted-ip", []string{}, "list of IPs or CIDR ranges to allow to bypass authentication. WARNING: trusting by IP has inherent security flaws, read the configuration documentation for more information.")
-	flagSet.Bool("force-https", false, "force HTTPS redirect for HTTP requests")
-	flagSet.String("redirect-url", "", "the OAuth Redirect URL. ie: \"https://internalapp.yourcompany.com/oauth2/callback\"")
-	flagSet.Bool("relative-redirect-url", false, "allow relative OAuth Redirect URL.")
-	flagSet.StringSlice("skip-auth-regex", []string{}, "(DEPRECATED for --skip-auth-route) bypass authentication for requests path's that match (may be given multiple times)")
-	flagSet.StringSlice("skip-auth-route", []string{}, "bypass authentication for requests that match the method & path. Format: method=path_regex OR method!=path_regex. For all methods: path_regex OR !=path_regex")
-	flagSet.StringSlice("api-route", []string{}, "return HTTP 401 instead of redirecting to authentication server if token is not valid. Format: path_regex")
-	flagSet.Bool("skip-provider-button", false, "will skip sign-in-page to directly reach the next step: oauth/start")
-	flagSet.Bool("skip-auth-preflight", false, "will skip authentication for OPTIONS requests")
-	flagSet.Bool("ssl-insecure-skip-verify", false, "skip validation of certificates presented when using HTTPS providers")
-	flagSet.Bool("skip-jwt-bearer-tokens", false, "will skip requests that have verified JWT bearer tokens (default false)")
-	flagSet.Bool("bearer-token-login-fallback", true, "if skip-jwt-bearer-tokens is set, fall back to normal login redirect with an invalid JWT. If false, 403 instead")
-	flagSet.Bool("force-json-errors", false, "will force JSON errors instead of HTTP error pages or redirects")
-	flagSet.Bool("encode-state", false, "will encode oauth state with base64")
-	flagSet.Bool("allow-query-semicolons", false, "allow the use of semicolons in query args")
-	flagSet.StringSlice("extra-jwt-issuers", []string{}, "if skip-jwt-bearer-tokens is set, a list of extra JWT issuer=audience pairs (where the issuer URL has a .well-known/openid-configuration or a .well-known/jwks.json)")
+	logger.Print("WARNING: `--signature-key` is deprecated. It will be removed in a future release")
 
-	flagSet.StringSlice("email-domain", []string{}, "authenticate emails with the specified domain (may be given multiple times). Use * to authenticate any email")
-	flagSet.StringSlice("whitelist-domain", []string{}, "allowed domains for redirection after authentication. Prefix domain with a . or a *. to allow subdomains (eg .example.com, *.example.com)")
-	flagSet.String("authenticated-emails-file", "", "authenticate against emails via file (one per line)")
-	flagSet.String("htpasswd-file", "", "additionally authenticate against a htpasswd file. Entries must be created with \"htpasswd -B\" for bcrypt encryption")
-	flagSet.StringSlice("htpasswd-user-group", []string{}, "the groups to be set on sessions for htpasswd users (may be given multiple times)")
-	flagSet.String("proxy-prefix", "/oauth2", "the url root path that this proxy should be nested under (e.g. /<oauth2>/sign_in)")
-	flagSet.String("ping-path", "/ping", "the ping endpoint that can be used for basic health checks")
-	flagSet.String("ping-user-agent", "", "special User-Agent that will be used for basic health checks")
-	flagSet.String("ready-path", "/ready", "the ready endpoint that can be used for deep health checks")
-	flagSet.String("session-store-type", "cookie", "the session storage provider to use")
-	flagSet.Bool("session-cookie-minimal", false, "strip OAuth tokens from cookie session stores if they aren't needed (cookie session store only)")
-	flagSet.String("redis-connection-url", "", "URL of redis server for redis session storage (eg: redis://[USER[:PASSWORD]@]HOST[:PORT])")
-	flagSet.String("redis-username", "", "Redis username. Applicable for Redis configurations where ACL has been configured. Will override any username set in `--redis-connection-url`")
-	flagSet.String("redis-password", "", "Redis password. Applicable for all Redis configurations. Will override any password set in `--redis-connection-url`")
-	flagSet.Bool("redis-use-sentinel", false, "Connect to redis via sentinels. Must set --redis-sentinel-master-name and --redis-sentinel-connection-urls to use this feature")
-	flagSet.String("redis-sentinel-password", "", "Redis sentinel password. Used only for sentinel connection; any redis node passwords need to use `--redis-password`")
-	flagSet.String("redis-sentinel-master-name", "", "Redis sentinel master name. Used in conjunction with --redis-use-sentinel")
-	flagSet.String("redis-ca-path", "", "Redis custom CA path")
-	flagSet.Bool("redis-insecure-skip-tls-verify", false, "Use insecure TLS connection to redis")
-	flagSet.StringSlice("redis-sentinel-connection-urls", []string{}, "List of Redis sentinel connection URLs (eg redis://[USER[:PASSWORD]@]HOST[:PORT]). Used in conjunction with --redis-use-sentinel")
-	flagSet.Bool("redis-use-cluster", false, "Connect to redis cluster. Must set --redis-cluster-connection-urls to use this feature")
-	flagSet.StringSlice("redis-cluster-connection-urls", []string{}, "List of Redis cluster connection URLs (eg redis://[USER[:PASSWORD]@]HOST[:PORT]). Used in conjunction with --redis-use-cluster")
-	flagSet.Int("redis-connection-idle-timeout", 0, "Redis connection idle timeout seconds, if Redis timeout option is non-zero, the --redis-connection-idle-timeout must be less then Redis timeout option")
-	flagSet.String("signature-key", "", "GAP-Signature request signature key (algorithm:secretkey)")
-	flagSet.Bool("gcp-healthchecks", false, "Enable GCP/GKE healthcheck endpoints")
+	components := strings.Split(o.SignatureKey, ":")
+	if len(components) != 2 {
+		return append(msgs, "invalid signature hash:key spec: "+
+			o.SignatureKey)
+	}
 
-	// MQTT configuration flags
-	flagSet.String("mqtt-username", "", "MQTT username for dynamic group loading")
-	flagSet.String("mqtt-password", "", "MQTT password for dynamic group loading")
-	flagSet.String("mqtt-broker", "", "MQTT broker address for dynamic group loading")
-	flagSet.Int("mqtt-port", 1883, "MQTT broker port for dynamic group loading")
-	flagSet.String("mqtt-allowed-groups-topic", "", "MQTT topic for receiving allowed groups updates")
+	algorithm, secretKey := components[0], components[1]
+	hash, err := hmacauth.DigestNameToCryptoHash(algorithm)
+	if err != nil {
+		return append(msgs, "unsupported signature hash algorithm: "+o.SignatureKey)
+	}
+	o.SetSignatureData(&options.SignatureData{Hash: hash, Key: secretKey})
+	return msgs
+}
 
-	flagSet.AddFlagSet(cookieFlagSet())
-	flagSet.AddFlagSet(loggingFlagSet())
-	flagSet.AddFlagSet(templatesFlagSet())
+// parseJwtIssuers takes in an array of strings in the form of issuer=audience
+// and parses to an array of jwtIssuer structs.
+func parseJwtIssuers(issuers []string, msgs []string) ([]jwtIssuer, []string) {
+	parsedIssuers := make([]jwtIssuer, 0, len(issuers))
+	for _, jwtVerifier := range issuers {
+		components := strings.Split(jwtVerifier, "=")
+		if len(components) < 2 {
+			msgs = append(msgs, fmt.Sprintf("invalid jwt verifier uri=audience spec: %s", jwtVerifier))
+			continue
+		}
+		uri, audience := components[0], strings.Join(components[1:], "=")
+		parsedIssuers = append(parsedIssuers, jwtIssuer{issuerURI: uri, audience: audience})
+	}
+	return parsedIssuers, msgs
+}
 
-	return flagSet
+// newVerifierFromJwtIssuer takes in issuer information in jwtIssuer info and returns
+// a verifier for that issuer.
+func newVerifierFromJwtIssuer(audienceClaims []string, extraAudiences []string, jwtIssuer jwtIssuer) (internaloidc.IDTokenVerifier, error) {
+	pvOpts := internaloidc.ProviderVerifierOptions{
+		AudienceClaims: audienceClaims,
+		ClientID:       jwtIssuer.audience,
+		ExtraAudiences: extraAudiences,
+		IssuerURL:      jwtIssuer.issuerURI,
+	}
+
+	pv, err := internaloidc.NewProviderVerifier(context.TODO(), pvOpts)
+	if err != nil {
+		// If the discovery didn't work, try again without discovery
+		pvOpts.JWKsURL = strings.TrimSuffix(jwtIssuer.issuerURI, "/") + "/.well-known/jwks.json"
+		pvOpts.SkipDiscovery = true
+
+		pv, err = internaloidc.NewProviderVerifier(context.TODO(), pvOpts)
+		if err != nil {
+			return nil, fmt.Errorf("could not construct provider verifier for JWT Issuer: %v", err)
+		}
+	}
+
+	return pv.Verifier(), nil
+}
+
+// jwtIssuer hold parsed JWT issuer info that's used to construct a verifier.
+type jwtIssuer struct {
+	issuerURI string
+	audience  string
+}
+
+func parseURL(toParse string, urltype string, msgs []string) (*url.URL, []string) {
+	parsed, err := url.Parse(toParse)
+	if err != nil {
+		return nil, append(msgs, fmt.Sprintf(
+			"error parsing %s-url=%q %s", urltype, toParse, err))
+	}
+	return parsed, msgs
 }
