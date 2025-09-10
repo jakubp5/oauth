@@ -1,0 +1,128 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+env:
+  - GO111MODULE=on
+  - CGO_ENABLED=0
+
+before:
+  hooks:
+    - go mod download
+    - go mod verify
+
+builds:
+  - id: oauth2-proxy
+    binary: oauth2-proxy
+    ldflags:
+      - -s -w
+      - -X github.com/oauth2-proxy/oauth2-proxy/v7/pkg/version.VERSION={{ .Version }}
+    goos:
+      - linux
+      - darwin
+      - freebsd
+      - windows
+    goarch:
+      - amd64
+      - arm64
+      - armv5
+      - armv6
+      - armv7
+      - ppc64le
+      - s390x
+    env:
+      - CGO_ENABLED=0
+    mod_timestamp: '{{ .CommitTimestamp }}'
+    ignore:
+      - goos: windows
+        goarch: arm64
+      - goos: freebsd
+        goarch: arm64
+      - goos: freebsd
+        goarch: armv5
+      - goos: freebsd
+        goarch: armv6
+      - goos: freebsd
+        goarch: armv7
+      - goos: freebsd
+        goarch: ppc64le
+      - goos: freebsd
+        goarch: s390x
+
+archives:
+  - id: oauth2-proxy
+    builds:
+      - oauth2-proxy
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE
+      - CHANGELOG.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  name_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^test:'
+      - '^chore'
+      - 'merge conflict'
+      - Merge pull request
+      - Merge remote-tracking branch
+      - Merge branch
+      - go mod tidy
+  groups:
+    - title: Dependency updates
+      regexp: '^.*?(feat|fix)\(deps\)!?:.+$'
+      order: 300
+    - title: 'New Features'
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 100
+    - title: 'Bug fixes'
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 200
+    - title: 'Documentation updates'
+      regexp: ^.*?doc(\([[:word:]]+\))??!?:.+$
+      order: 400
+    - title: Other work
+      order: 9999
+
+release:
+  github:
+    owner: jakubp5
+    name: oauth
+  draft: false
+  prerelease: auto
+  mode: replace
+  header: |
+    ## OAuth2 Proxy ({{ .Version }})
+
+    For more information, please see the [documentation](https://oauth2-proxy.github.io/oauth2-proxy/).
+
+    ### Installation
+
+    You can download the binary for your platform from the assets below:
+
+    #### Using curl
+    ```bash
+    # Linux AMD64
+    curl -L https://github.com/jakubp5/oauth/releases/download/{{ .Version }}/oauth2-proxy-linux-amd64.tar.gz | tar xz
+    
+    # macOS AMD64
+    curl -L https://github.com/jakubp5/oauth/releases/download/{{ .Version }}/oauth2-proxy-darwin-amd64.tar.gz | tar xz
+    
+    # macOS ARM64 (Apple Silicon)
+    curl -L https://github.com/jakubp5/oauth/releases/download/{{ .Version }}/oauth2-proxy-darwin-arm64.tar.gz | tar xz
+    
+    # Windows
+    curl -L https://github.com/jakubp5/oauth/releases/download/{{ .Version }}/oauth2-proxy-windows-amd64.zip
+    ```
