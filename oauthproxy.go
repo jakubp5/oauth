@@ -302,7 +302,7 @@ func (p *OAuthProxy) Start() error {
 
 	// Start MQTT client if configured
 	if p.mqttClient != nil {
-		if err := p.mqttClient.Connect(ctx); err != nil {
+		if err := p.mqttClient.Connect(); err != nil {
 			logger.Printf("Warning: Failed to connect to MQTT broker: %v", err)
 		}
 		defer p.mqttClient.Disconnect()

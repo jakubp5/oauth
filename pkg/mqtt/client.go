@@ -1,7 +1,6 @@
 package mqtt
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -51,7 +50,7 @@ func (c *Client) SetOnGroupsUpdate(callback func([]string)) {
 }
 
 // Connect establishes connection to the MQTT broker
-func (c *Client) Connect(ctx context.Context) error {
+func (c *Client) Connect() error {
 	if c.broker == "" || c.topic == "" {
 		logger.Printf("MQTT not configured, skipping connection")
 		return nil
@@ -112,12 +111,12 @@ func (c *Client) onConnect(client mqtt.Client) {
 }
 
 // onConnectionLost handles connection loss
-func (c *Client) onConnectionLost(client mqtt.Client, err error) {
+func (c *Client) onConnectionLost(_ mqtt.Client, err error) {
 	logger.Errorf("MQTT connection lost: %v", err)
 }
 
 // onMessageReceived handles incoming MQTT messages
-func (c *Client) onMessageReceived(client mqtt.Client, msg mqtt.Message) {
+func (c *Client) onMessageReceived(_ mqtt.Client, msg mqtt.Message) {
 	logger.Printf("Received MQTT message on topic %s: %s", msg.Topic(), string(msg.Payload()))
 
 	var groupUpdate GroupUpdate
