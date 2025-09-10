@@ -113,7 +113,7 @@ redirect_url="http://localhost:4180/oauth2/callback"
 		opts.EmailDomains = []string{"example.com"}
 		opts.Cookie.Secure = false
 		opts.RawRedirectURL = "http://localhost:4180/oauth2/callback"
-		opts.MQTTPort = 1883
+		opts.MQTTPort = 0
 
 		opts.UpstreamServers = options.UpstreamConfig{
 			Upstreams: []options.Upstream{
