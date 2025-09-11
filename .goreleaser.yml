@@ -5,16 +5,20 @@ env:
   - GO111MODULE=on
   - CGO_ENABLED=0
 
+before:
+  hooks:
+    - go mod download
+    - go mod verify
+
 builds:
   - id: oauth2-proxy
     binary: oauth2-proxy
     ldflags:
       - -s -w
-      - -X main.version={{ .Version }}
+      - -X github.com/oauth2-proxy/oauth2-proxy/v7/pkg/version.VERSION={{ .Version }}
     goos:
       - linux
       - darwin
-      - windows
     goarch:
       - amd64
       - arm64
@@ -33,6 +37,19 @@ archives:
     files:
       - README.md
       - LICENSE*
+      - CHANGELOG.md
+
+nfpms:
+  - id: oauth2-proxy
+    package_name: oauth2-proxy
+    builds:
+      - oauth2-proxy
+    vendor: jakubp5
+    homepage: https://github.com/jakubp5/oauth
+    maintainer: "jakubp5 <jakub@example.com>"
+    description: "OAuth2 Proxy - A reverse proxy that provides authentication with Google, Github or other providers"
+    license: MIT
+    bindir: /usr/bin
 
 checksum:
   name_template: "checksums.txt"
@@ -70,10 +87,13 @@ changelog:
       order: 9999
 
 release:
+  github:
+    owner: jakubp5
+    name: oauth
   draft: false
   prerelease: auto
   mode: replace
   header: |
     ## OAuth2 Proxy ({{ .Version }})
 
-    For more information, please see the [documentation](https://github.com/oauth2-proxy/oauth2-proxy/blob/main/README.md). 
+    For more information, please see the [documentation](https://github.com/jakubp5/oauth/blob/main/README.md). 
