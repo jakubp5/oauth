@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - '*'
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - closed
 
 permissions:
   contents: write
@@ -11,6 +16,7 @@ permissions:
 
 jobs:
   goreleaser:
+    if: github.event_name == 'push' || (github.event_name == 'pull_request_target' && github.event.pull_request.merged)
     runs-on: ubuntu-latest
     env:
       DOCKER_CLI_EXPERIMENTAL: "disabled"
