@@ -1,46 +1,102 @@
-name: goreleaser
+# .github/workflows/calver-release.yml
+name: CalVer Release
 
 on:
   push:
-    branches:
-      - main
-    tags:
-      - '*'
-  pull_request_target:
-    branches:
-      - main
-    types:
-      - closed
+    branches: [main]  # or [master] if that's your default branch
 
 permissions:
   contents: write
   packages: write
 
+env:
+  # Update the binary name for your oauth2-proxy
+  APP_NAME: oauth2-proxy-mqtt
+
 jobs:
-  goreleaser:
-    if: github.event_name == 'push' || (github.event_name == 'pull_request_target' && github.event.pull_request.merged)
+  build-and-release:
     runs-on: ubuntu-latest
-    env:
-      DOCKER_CLI_EXPERIMENTAL: "disabled"
     steps:
-      -
-        name: Checkout
+      # 1) Checkout full history (tags included)
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      -
-        name: Set up Go
+
+      # 2) Set up Go tool-chain
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
-      -
-        name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      -
-        name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          version: latest
-          args: release --clean
+          go-version: '1.24'  # Updated to match oauth2-proxy requirements
+
+      # 3) Produce a Calendar Version string
+      - name: Generate CalVer
+        id: calver
+        run: |
+          DATE_VERSION=$(date +%Y.%m.%d)
+          BUILD_NUMBER=${{ github.run_number }}
+          echo "version=${DATE_VERSION}.${BUILD_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      # 4) Make and push the tag
+      - name: Create & push Git tag
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} 
+          VERSION: ${{ steps.calver.outputs.version }}
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name  "GitHub Action"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+      # 5) Cross-compile for six target triples
+      - name: Build binaries
+        env:
+          VERSION: ${{ steps.calver.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Targets you want to ship
+          TARGETS=(
+            "linux/amd64"
+            "linux/arm64"
+            "darwin/amd64"
+            "darwin/arm64"
+            "windows/amd64"
+            "windows/arm64"
+          )
+          for target in "${TARGETS[@]}"; do
+            IFS="/" read -r GOOS GOARCH <<<"$target"
+            BIN_NAME="${APP_NAME}-v${VERSION}-${GOOS}-${GOARCH}"
+            EXT=""
+            if [[ "$GOOS" == "windows" ]]; then EXT=".exe"; fi
+
+            echo "→ building $BIN_NAME$EXT"
+            CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH \
+              go build -trimpath -ldflags "-X github.com/oauth2-proxy/oauth2-proxy/v7/pkg/version.VERSION=$VERSION -w -s" \
+              -a \
+              -o "dist/$BIN_NAME$EXT" .
+
+            # Compress
+            if [[ "$GOOS" == "windows" ]]; then
+              zip -j "dist/$BIN_NAME.zip" "dist/$BIN_NAME$EXT"
+              rm "dist/$BIN_NAME$EXT"
+            else
+              tar -C dist -czf "dist/$BIN_NAME.tar.gz" "$BIN_NAME$EXT"
+              rm "dist/$BIN_NAME$EXT"
+            fi
+          done
+
+      # 6) Checksums (and optional signing)
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > "${APP_NAME}_checksums.txt"
+
+      # 7) Create the Release and upload every file in dist/
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION:   ${{ steps.calver.outputs.version }}
+        run: |
+          gh release create "v$VERSION" \
+            --title "OAuth2 Proxy with MQTT Support v$VERSION" \
+            --notes "Automated CalVer release with MQTT support for dynamic group updates.
